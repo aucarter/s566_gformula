@@ -1,0 +1,16 @@
+---
+title: "Parametric g-formula: a reworked example"
+author: "Anna Constantino-Pettit, Suyoung Kwon, Austin Carter"
+date: "2/10/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Paper Review
+
+## Re-analysis Methods
+
+## Results
