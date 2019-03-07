@@ -81,11 +81,12 @@ dt[, day_gvhd := day * gvhd]
 dt[, daysq_gvhd := daysq * gvhd]
 dt[, daycu_gvhd := daycu * gvhd]
 
+
 # Model for probability of platnorm=1 at day k
 m.platnorm <- glm(platnorm ~ all + cmv + male + age + gvhdm1 + daysgvhd + daysnorelapse + agecurs1 + agecurs2 + wait, data = dt[platnormm1 == 0], 
                   family = binomial(link = "logit"))
 v.platnorm <- vectorize.fit(m.platnorm, dt)
-pred.vars <- c(pred.vars, get.dep.var(m.platnorm))
+pred.vars <- get.dep.var(m.platnorm)
 
 # Model for probablity of relapse = 1 at day k
 m.relapse <- glm(relapse ~ all + cmv + male + age + gvhdm1 + daysgvhd  + platnorm + daysnoplatnorm + agecurs1 + agecurs2 + day + daysq + wait, data = dt[relapsem1 == 0], 
@@ -168,8 +169,13 @@ update.lags <- function(var.list, matrix) {
   return(matrix)
 }
 
-# TODO Update time varying predictors
-update.time <- 
+# TODO Update time varying predictors: daysq, daycu
+update.time <- function(matrix) {
+  matrix[,"day"] <- matrix[,"day"] + 1
+  matrix[, "daysq"] <- matrix[, "day"]**2
+  matrix[, "daycu"] <- matrix[, "day"]**3
+  return(matrix)
+}
 
 gen.baseline <- function(n) {
   M.n <- n * nrow(in.dt)
@@ -179,9 +185,10 @@ gen.baseline <- function(n) {
   M <- cbind(dt.matrix[M.ids,])
   return(M)
 }
-
-simulate <- function(matrix, intervene) {
-  for(i in 1:(max(dt$day) - 1)) {
+# TODO: 1) take out dead and ltfu and shrink the coef.dt 2) reduce all.dt to only hold necessary variables
+simulate <- function(matrix, intervene, coef.dt) {
+  all.dt <- as.data.table(matrix)
+  for(i in 1:(unique(max(dt$day)) - 1)) {
     print(paste0(i, " of ", (max(dt$day) - 1)))
     var.list <- ifelse(intervene, setdiff(coef.dt$variable, c("gvhd", "censlost")), coef.dt$variable)
     for(var in var.list) {
@@ -190,18 +197,19 @@ simulate <- function(matrix, intervene) {
       matrix <- update.cum(var, matrix)
     }
     matrix <- update.lags(lag.list, matrix)
-    matrix[,"day"] <- matrix[,"day"] +1
+    matrix <- update.time(matrix)
+    all.dt <- rbind(all.dt, as.data.table(matrix))
   }
-  return(matrix)
+  return(all.dt)
 }
   
 # Natural course
-n.draws <- 10
+n.draws <- 1000
 M <- gen.baseline(n.draws)
-sim.nat <- as.data.table(simulate(M, intervene = F))
+sim.nat <- as.data.table(simulate(M, intervene = F, coef.dt))
 
 # Intervention
 M <- gen.baseline(n.draws)
-sim.int <- as.data.table(simulate(M, intervene = T))
+sim.int <- as.data.table(simulate(M, intervene = T), coef.dt)
 
 ## Step 6 - concatentate intervetion data sets and run Cox model
