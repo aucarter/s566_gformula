@@ -1,5 +1,6 @@
 ### Setup
 library(data.table);library(boot)
+rm(list = ls())
 
 ### Paths
 data.path <- "data/bone_data.csv"
@@ -53,8 +54,8 @@ all.p.day.dt[, daysplatnorm := cumsum(platnorm == 1), by = id]
 all.p.day.dt[, daysgvhd := cumsum(gvhd == 1), by = id]
 
 # TODO clean up unused variables
-in.dt[, c("yesterday", "t", "t_rel", "d_dea", "t_gvhd", "d_gvhd", "d_rel", "t_pla", "d_pla") := NULL]
-
+in.dt[, c("t", "t_rel", "d_dea", "t_gvhd", "d_gvhd", "d_rel", "t_pla", "d_pla") := NULL]
+all.p.day.dt[, c("yesterday") := NULL]
 dt <- merge(all.p.day.dt, in.dt, by = "id")
 
 
@@ -89,7 +90,7 @@ v.platnorm <- vectorize.fit(m.platnorm, dt)
 pred.vars <- get.dep.var(m.platnorm)
 
 # Model for probablity of relapse = 1 at day k
-m.relapse <- glm(relapse ~ all + cmv + male + age + gvhdm1 + daysgvhd  + platnorm + daysnoplatnorm + agecurs1 + agecurs2 + day + daysq + wait, data = dt[relapsem1 == 0], 
+m.relapse <- glm(relapse ~ all + cmv + male + age + gvhdm1 + daysgvhd  + platnormm1 + daysnoplatnorm + agecurs1 + agecurs2 + day + daysq + wait, data = dt[relapsem1 == 0], 
              family = binomial(link = "logit"))
 v.relapse <- vectorize.fit(m.relapse, dt)
 pred.vars <- get.dep.var(m.relapse)
@@ -132,32 +133,18 @@ gen.draws <- function(var, matrix) {
 }
 
 # Update cumulative values on each iteration
-update.cum <- function(var, matrix) {
-  if(var == "platnorm") {
-    # Update days no platnorm
-    matrix[, "daysnoplatnorm"] <- matrix[, "daysnoplatnorm"] + (1 - matrix[, var])
-    # Update platnorm
-    matrix[, "daysplatnorm"] <- matrix[, "daysplatnorm"] + matrix[, var]
-  } else if(var == "relapse") {
-    # Update days no relapse
-    matrix[, "daysnorelapse"] <- matrix[, "daysnorelapse"] + (1 - matrix[, var])
-    # Update relapse
-    matrix[, "daysrelapse"] <- matrix[, "daysrelapse"] + matrix[, var]
-  } else if(var == "gvhd") {
-    # Update days no gvhd
-    matrix[, "daysnogvhd"] <- matrix[, "daysnogvhd"] + (1 - matrix[, var])
-    # Update relapse
-    matrix[, "daysgvhd"] <- matrix[, "daysgvhd"] + matrix[, var]
-    
+update.cum <- function(var, M) {
+  # Update days no platnorm
+  M[, paste0("daysno", var)] <- M[, paste0("daysno", var)] + (1 - M[, var])
+  # Update platnorm
+  M[, paste0("days", var)] <- M[, paste0("days", var)] + M[, var]
+  if(var == "gvhd") {
     # Interaction terms
-    matrix[, "day_gvhd"] <- matrix[, "gvhd"] * matrix[, var]
-    matrix[, "daysq_gvhd"] <- matrix[, "gvhd"] * matrix[, var]
-    matrix[, "daycu_gvhd"] <- matrix[, "gvhd"] * matrix[, var]
-  } else if (var == "censlost" | var == "d") {
-    # Set LTFU or death variable to the day that it occured
-    matrix[matrix[, var] == 1, var] <- unique(matrix[, "day"])
+    M[, "day_gvhd"] <- M[, "gvhd"] * M[, var]
+    M[, "daysq_gvhd"] <- M[, "gvhd"] * M[, var]
+    M[, "daycu_gvhd"] <- M[, "gvhd"] * M[, var]
   }
-  return(matrix)
+  return(M)
 }
 
 # Update lags on each iteration
@@ -169,12 +156,15 @@ update.lags <- function(var.list, matrix) {
   return(matrix)
 }
 
-# TODO Update time varying predictors: daysq, daycu
-update.time <- function(matrix) {
-  matrix[,"day"] <- matrix[,"day"] + 1
-  matrix[, "daysq"] <- matrix[, "day"]**2
-  matrix[, "daycu"] <- matrix[, "day"]**3
-  return(matrix)
+# Update time varying predictors: daysq, daycu
+update.time <- function(M) {
+  day <- M[,"day"][1] + 1
+  M[,"day"] <- M[,"day"] + 1
+  M[, "daysq"] <- M[,"day"]**2
+  M[, "daycu"] <- M[,"day"]**3
+  M[, "daycurs1"] <- ((day>63)*((M[,"day"]-63)/63)**3)+((day>716)*((M[,"day"]-716)/63)**3)*(350.0-63) -((day>350)*((M[,"day"]-350)/63)**3)*(716-63)/(716-350)
+  M[, "daycurs2"] <- ((day>168)*((M[,"day"]-168)/63)**3)+((day>716)*((M[,"day"]-716)/63)**3)*(350-168) -((day>350)*((M[,"day"]-350)/63)**3)*(716-168)/(716-350)
+  return(M)
 }
 
 gen.baseline <- function(n) {
@@ -185,22 +175,37 @@ gen.baseline <- function(n) {
   M <- cbind(dt.matrix[M.ids,])
   return(M)
 }
-# TODO: 1) take out dead and ltfu and shrink the coef.dt 2) reduce all.dt to only hold necessary variables
+
 simulate <- function(matrix, intervene, coef.dt) {
-  all.dt <- as.data.table(matrix)
+  out.dt <- data.table()
+  # Subset variable list for intervention run
+  if(intervene) {
+    var.list <- setdiff(coef.dt$variable, c("gvhd", "censlost"))
+  } else {
+    var.list <- coef.dt$variable 
+  }
   for(i in 1:(unique(max(dt$day)) - 1)) {
-    print(paste0(i, " of ", (max(dt$day) - 1)))
-    var.list <- ifelse(intervene, setdiff(coef.dt$variable, c("gvhd", "censlost")), coef.dt$variable)
+    print(paste0(i, " of ", (max(dt$day) - 1), ": ", nrow(matrix), " alive"))
     for(var in var.list) {
       var.idx <- which(colnames(matrix) == var)
       matrix[, var.idx] <- gen.draws(var, matrix)
+    }
+    for (var in lag.list) {
       matrix <- update.cum(var, matrix)
     }
     matrix <- update.lags(lag.list, matrix)
     matrix <- update.time(matrix)
-    all.dt <- rbind(all.dt, as.data.table(matrix))
+    dead.dt <- as.data.table(matrix[matrix[, "d"] == 1 | matrix[, "censlost"] == 1, ,drop = F])
+    if(nrow(dead.dt) > 0) {
+      out.dt <- rbind(out.dt, dead.dt)
+      matrix <- matrix[!(matrix[, "d"] == 1 | matrix[, "censlost"] == 1), ,drop = F]
+    }
+    if(nrow(matrix) == 0) {
+      break
+    }
   }
-  return(all.dt)
+  out.dt <- rbind(out.dt, as.data.table(matrix))
+  return(out.dt)
 }
   
 # Natural course
