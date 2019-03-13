@@ -53,7 +53,6 @@ all.p.day.dt[, daysrelapse := cumsum(relapse == 1), by = id]
 all.p.day.dt[, daysplatnorm := cumsum(platnorm == 1), by = id]
 all.p.day.dt[, daysgvhd := cumsum(gvhd == 1), by = id]
 
-# TODO clean up unused variables
 in.dt[, c("t", "t_rel", "d_dea", "t_gvhd", "d_gvhd", "d_rel", "t_pla", "d_pla") := NULL]
 all.p.day.dt[, c("yesterday") := NULL]
 dt <- merge(all.p.day.dt, in.dt, by = "id")
@@ -215,6 +214,10 @@ sim.nat <- as.data.table(simulate(M, intervene = F, coef.dt))
 
 # Intervention
 M <- gen.baseline(n.draws)
-sim.int <- as.data.table(simulate(M, intervene = T), coef.dt)
+sim.int <- as.data.table(simulate(M, intervene = T, coef.dt))
+
+# Summary stats
+nrow(sim.nat[d == 0]) / nrow(sim.nat) * 100
+nrow(sim.int[d == 0]) / nrow(sim.int) * 100
 
 ## Step 6 - concatentate intervetion data sets and run Cox model
