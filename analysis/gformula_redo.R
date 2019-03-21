@@ -71,7 +71,7 @@ vectorize.fit <- function(model.fit, dt){
   vec <- c(coefs[1], vec)
 }
 
-get.dep.var <- function(model.fit) {
+get.pred.vars <- function(model.fit) {
   rownames(attr(summary(model.fit)$terms, "factors"))[1]
 }
 
@@ -85,31 +85,31 @@ dt[, daycu_gvhd := daycu * gvhd]
 m.platnorm <- glm(platnorm ~ all + cmv + male + age + gvhdm1 + daysgvhd + daysnorelapse + agecurs1 + agecurs2 + wait, data = dt[platnormm1 == 0], 
                   family = binomial(link = "logit"))
 v.platnorm <- vectorize.fit(m.platnorm, dt)
-pred.vars <- get.dep.var(m.platnorm)
+pred.vars <- get.pred.vars(m.platnorm)
 
 # Model for probablity of relapse = 1 at day k
 m.relapse <- glm(relapse ~ all + cmv + male + age + gvhdm1 + daysgvhd  + platnormm1 + daysnoplatnorm + agecurs1 + agecurs2 + day + daysq + wait, data = dt[relapsem1 == 0], 
              family = binomial(link = "logit"))
 v.relapse <- vectorize.fit(m.relapse, dt)
-pred.vars <- get.dep.var(m.relapse)
+pred.vars <- get.pred.vars(m.relapse)
 
 # Model for probability of exposure=1 at day k
 m.gvhd <- glm(gvhd ~ all + cmv + male + age + platnormm1 + daysnoplatnorm + relapsem1 + daysnorelapse + agecurs1 + agecurs2 + day + daysq + wait, data = dt[gvhdm1 == 0], 
                  family = binomial(link = "logit"))
 v.gvhd <- vectorize.fit(m.gvhd, dt)
-pred.vars <- c(pred.vars, get.dep.var(m.gvhd))
+pred.vars <- c(pred.vars, get.pred.vars(m.gvhd))
 
 # Model for probability of censoring=1 at day k
 m.censlost <- glm(censlost ~ all + cmv + male + age + daysgvhd + daysnoplatnorm + daysnorelapse + agesq + day + daysq + daycu + wait, data = dt, 
               family = binomial(link = "logit"))
 v.censlost <- vectorize.fit(m.censlost, dt)
-pred.vars <- c(pred.vars, get.dep.var(m.censlost))
+pred.vars <- c(pred.vars, get.pred.vars(m.censlost))
 
 # Model for probability of outcome=1 at day k
 m.d <- glm(d ~ all + cmv + male + age + gvhd + platnorm + daysnoplatnorm + relapse + daysnorelapse + agesq + day + daysq + daycu + wait + day_gvhd + daysq_gvhd + daycu_gvhd, data = dt, 
               family = binomial(link = "logit"))
 v.d <- vectorize.fit(m.d, dt)
-pred.vars <- c(pred.vars, get.dep.var(m.d))
+pred.vars <- c(pred.vars, get.pred.vars(m.d))
 
 coef.dt <- data.table(rbind(v.relapse, v.platnorm, v.gvhd, v.censlost, v.d))
 colnames(coef.dt)[2:ncol(coef.dt)] <- names(dt)
@@ -117,8 +117,44 @@ coef.dt[, variable := c("relapse", "platnorm", "gvhd", "censlost", "d")]
 coef.dt[is.na(coef.dt)] <- 0
 
 ## Step 3 - sample with replacement from data
+
+# Generate a baseline matrix
+gen.baseline <- function(n, baseline.dt, intervene) {
+  M.n <- n * nrow(baseline.dt)
+  M.ids <- sample(baseline.dt$id, M.n, replace = T)
+  days.no <- grep("daysno", names(baseline.dt), value = T)
+  baseline.dt[, c("day", "d", "gvhd", "platnorm", "relapse", days.no) := 0]
+  if(intervene == 2) {
+    baseline.dt[, gvhd := 1]
+  }
+  dt.matrix <- as.matrix(baseline.dt)
+  M <- cbind(dt.matrix[M.ids,])
+  return(M)
+}
+
+# Update time varying predictors: day, daysq, daycu, daycurs1, dacurs2
+update.time <- function(M) {
+  day <- M[,"day"][1] + 1
+  M[,"day"] <- M[,"day"] + 1
+  M[, "daysq"] <- M[,"day"]**2
+  M[, "daycu"] <- M[,"day"]**3
+  M[, "daycurs1"] <- ((day>63)*((M[,"day"]-63)/63)**3)+((day>716)*((M[,"day"]-716)/63)**3)*(350.0-63) -((day>350)*((M[,"day"]-350)/63)**3)*(716-63)/(716-350)
+  M[, "daycurs2"] <- ((day>168)*((M[,"day"]-168)/63)**3)+((day>716)*((M[,"day"]-716)/63)**3)*(350-168) -((day>350)*((M[,"day"]-350)/63)**3)*(716-168)/(716-350)
+  return(M)
+}
+
+# Update lags on each iteration: platnormm1, gvhdm1, relapsem1
+lag.list <- c("gvhd", "relapse", "platnorm")
+update.lags <- function(var.list, M) {
+  for(var in var.list) {
+    M[, paste0(var, "m1")] <- M[, var]
+  }
+  return(M)
+}
+
+
 # Predict log.odds, convert to probability, and sample from Bernoulli
-gen.draws <- function(var, M) {
+gen.draws <- function(var, M, coef.dt) {
   var.idx <- which(colnames(M) == var)
   zero.idx <- which(M[, var.idx] == 0)
   if(length(zero.idx) > 0) {
@@ -138,9 +174,9 @@ gen.draws <- function(var, M) {
 
 # Update cumulative values on each iteration
 update.cum <- function(var, M) {
-  # Update days no platnorm
+  # Update days no platnorm, relapse, or gvhd
   M[, paste0("daysno", var)] <- M[, paste0("daysno", var)] + (1 - M[, var])
-  # Update platnorm
+  # Update days platnorm, relapse, or gvhd
   M[, paste0("days", var)] <- M[, paste0("days", var)] + M[, var]
   if(var == "gvhd") {
     # Interaction terms
@@ -151,39 +187,8 @@ update.cum <- function(var, M) {
   return(M)
 }
 
-# Update lags on each iteration: platnormm1, gvhdm1, relapsem1
-lag.list <- c("gvhd", "relapse", "platnorm")
-update.lags <- function(var.list, M) {
-  for(var in var.list) {
-    M[, paste0(var, "m1")] <- M[, var]
-  }
-  return(M)
-}
 
-# Update time varying predictors: day, daysq, daycu, daycurs1, dacurs2
-update.time <- function(M) {
-  day <- M[,"day"][1] + 1
-  M[,"day"] <- M[,"day"] + 1
-  M[, "daysq"] <- M[,"day"]**2
-  M[, "daycu"] <- M[,"day"]**3
-  M[, "daycurs1"] <- ((day>63)*((M[,"day"]-63)/63)**3)+((day>716)*((M[,"day"]-716)/63)**3)*(350.0-63) -((day>350)*((M[,"day"]-350)/63)**3)*(716-63)/(716-350)
-  M[, "daycurs2"] <- ((day>168)*((M[,"day"]-168)/63)**3)+((day>716)*((M[,"day"]-716)/63)**3)*(350-168) -((day>350)*((M[,"day"]-350)/63)**3)*(716-168)/(716-350)
-  return(M)
-}
 
-# Generate a baseline matrix
-gen.baseline <- function(n, baseline.dt, intervene) {
-  M.n <- n * nrow(baseline.dt)
-  M.ids <- sample(baseline.dt$id, M.n, replace = T)
-  days.no <- grep("daysno", names(baseline.dt), value = T)
-  baseline.dt[, c("day", "d", "gvhd", "platnorm", "relapse", days.no) := 0]
-  if(intervene == 2) {
-    baseline.dt[, gvhd := 1]
-  }
-  dt.matrix <- as.matrix(baseline.dt)
-  M <- cbind(dt.matrix[M.ids,])
-  return(M)
-}
 
 simulate <- function(M, intervene, coef.dt) {
   total <- nrow(M)
@@ -256,23 +261,8 @@ sim.acute <- simulate(M.acute, intervene = 3, coef.dt)
 M.chronic <- gen.baseline(n.draws, dt[day == 1], intervene = 4)
 sim.chronic <- simulate(M.chronic, intervene = 4, coef.dt)
 
-sim.acute[, scenario := "Prevent Acute GvHD"]
-sim.chronic[, scenario := "Prevent Chronic GvHD"]
-sim.dt <- rbindlist(list(sim.acute, sim.chronic), use.names = T, fill = T)
-write.csv(sim.dt, "results/sim_acute_chronic_results.csv", row.names = F)
-
-
-
-# Summary stats
-nrow(sim.nat[d == 1]) / nrow(sim.nat) * 100
-nrow(sim.ngvhd[d == 1]) / nrow(sim.ngvhd) * 100
-nrow(sim.agvhd[d == 1]) / nrow(sim.agvhd) * 100
 
 ## Step 6 - concatentate intervetion data sets and run Cox model
-fit.nat <- survfit(Surv("day", "d"), data = sim.nat)
-
-
-
 sim.nat[, scenario := "Natural Course"]
 sim.agvhd[, scenario := "Always GvHD"]
 sim.ngvhd[, scenario := "No GvHD"]
@@ -284,10 +274,9 @@ sim.dt <- rbindlist(list(sim.nat, sim.agvhd, sim.ngvhd, sim.acute, sim.chronic),
 out.dt <- sim.dt[, .(day, d, scenario)]
 write.csv(out.dt, "results/sim_results.csv", row.names = F)
 
-
-#
-survfit.2 <- survfit(Surv(day, d) ~ scenario, data=sim.dt, conf.type = "log-log")
-plot(survfit.2,  col=c("blue", "red", "green", "purple", "orange"),lty=c("dashed", "solid", "solid", "solid", "solid"), xlab="Days",
+# Make kaplan meier survival plots
+surv.fit <- survfit(Surv(day, d) ~ scenario, data=sim.dt, conf.type = "log-log")
+plot(surv.fit,  col=c("blue", "red", "green", "purple", "orange"),lty=c("dashed", "solid", "solid", "solid", "solid"), xlab="Days",
      ylab="Survival Probability", main="Kaplan Meier survial curve estimates")
 
 legend("topright",
@@ -300,7 +289,7 @@ legend("topright",
 ## Step 7: Cox Proportional Hazard Model and Uncertainty intervals
 print.hazard <- function(nat.dt, int.dt) {
   coxph(Surv(day, d) ~ gvhd, data = all.p.day.dt)
-  rand <- sample(1:137000, 137000)
+  rand <- sample(1:137000, 137000, replace = T)
   boot.a <- unlist(lapply(1:137, function(i) {
     idx <- rand[(i*137+1):((i+1)*137)]
     cox.fit <- coxph(Surv(day, d) ~ scenario, data = rbind(nat.dt[idx], int.dt[idx]))
