@@ -219,7 +219,7 @@ simulate <- function(M, intervene, coef.dt) {
     # Generate a predicted value for each variable in order
     for(var in var.list) {
       var.idx <- which(colnames(M) == var)
-      M <- gen.draws(var, M)
+      M <- gen.draws(var, M, coef.dt)
     }
     # Pull out dead or censored and add to out table
     dead.dt <- as.data.table(M[M[, "d"] == 1 | M[, "censlost"] == 1, ,drop = F])
